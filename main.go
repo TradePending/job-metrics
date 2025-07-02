@@ -9,7 +9,13 @@ import (
 	"net/url"
 	"os"
 	"strings"
+
+	// MongoDB for Agenda support
 	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
 
 	mysql "github.com/go-sql-driver/mysql"
 
@@ -98,7 +104,7 @@ func getSidekiqQueueLengths(rdb *redis.Client) (map[string]int, error) {
 }
 func main() {
 	var (
-		jobType              = flag.String("job-type", "sidekiq", "Type of jobs to collect: 'sidekiq' or 'laravel'")
+		jobType              = flag.String("job-type", "sidekiq", "Type of jobs to collect: 'sidekiq', 'laravel', or 'agenda'")
 		mysqlDSN             = flag.String("mysql-dsn", "laravel:secret@tcp(mysql:3306)/laravel", "MySQL DSN or URL (e.g. user:pass@tcp(host:port)/db or mysql://host:port/db?useSSL=true)")
 		redisAddr            = flag.String("redis-addr", "localhost:6379", "Redis server address (host:port)")
 		redisPassword        = flag.String("redis-password", "", "Redis password (optional)")
@@ -113,6 +119,8 @@ func main() {
 		otelServiceNamespace = flag.String("otel-service-namespace", "default", "OpenTelemetry service namespace")
 		otelServiceEnv       = flag.String("otel-service-env", "dev", "OpenTelemetry deployment environment")
 		otelHost             = flag.String("otel-host", "localhost", "OpenTelemetry host name")
+		agendaMongoURI       = flag.String("agenda-mongo-uri", "mongodb://localhost:27017/agenda", "MongoDB connection string for Agenda jobs")
+		agendaCollection     = flag.String("agenda-collection", "agendaJobs", "MongoDB collection name for Agenda jobs")
 	)
 	flag.Parse()
 
@@ -124,6 +132,8 @@ func main() {
 
 	var rdb *redis.Client
 	var db *sql.DB
+	var mongoClient *mongo.Client
+	var mongoDBName string
 	if *jobType == "sidekiq" {
 		redisOpts := &redis.Options{
 			Addr:     *redisAddr,
@@ -188,8 +198,28 @@ func main() {
 			os.Exit(1)
 		}
 		defer db.Close()
+	} else if *jobType == "agenda" {
+		uri := *agendaMongoURI
+		clientOpts := options.Client().ApplyURI(uri)
+		var err error
+		mongoClient, err = mongo.Connect(ctx, clientOpts)
+		if err != nil {
+			fmt.Println("Error connecting to MongoDB:", err)
+			os.Exit(1)
+		}
+		u, err := url.Parse(uri)
+		if err != nil {
+			fmt.Println("Invalid MongoDB URI:", err)
+			os.Exit(1)
+		}
+		mongoDBName = strings.TrimPrefix(u.Path, "/")
+		if mongoDBName == "" {
+			fmt.Println("MongoDB URI must include a database name")
+			os.Exit(1)
+		}
+		defer func() { _ = mongoClient.Disconnect(ctx) }()
 	} else {
-		fmt.Println("Unknown job type. Use 'sidekiq' or 'laravel'.")
+		fmt.Println("Unknown job type. Use 'sidekiq', 'laravel', or 'agenda'.")
 		os.Exit(1)
 	}
 
@@ -229,6 +259,14 @@ func main() {
 							return err
 						}
 						for queue, count := range queueCounts {
+							o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", queue)))
+						}
+					} else if *jobType == "agenda" {
+						agendaCounts, err := getAgendaQueueCounts(mongoClient, mongoDBName, *agendaCollection)
+						if err != nil {
+							return err
+						}
+						for queue, count := range agendaCounts {
 							o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", queue)))
 						}
 					}
@@ -287,11 +325,59 @@ func main() {
 				fmt.Println("Error registering callback:", err)
 				os.Exit(1)
 			}
+		} else if *jobType == "agenda" {
+			agendaCounts, err := getAgendaQueueCounts(mongoClient, mongoDBName, *agendaCollection)
+			if err != nil {
+				fmt.Println("Error collecting agenda job queue counts:", err)
+				os.Exit(1)
+			}
+			for queue, count := range agendaCounts {
+				fmt.Printf("queue=%s length=%d\n", queue, count)
+			}
+			_, err = meter.RegisterCallback(
+				func(ctx context.Context, o metric.Observer) error {
+					for queue, count := range agendaCounts {
+						o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", queue)))
+					}
+					return nil
+				},
+				queueGauge,
+			)
+			if err != nil {
+				fmt.Println("Error registering callback:", err)
+				os.Exit(1)
+			}
 		}
 		// Give time for the exporter to flush
 		time.Sleep(2 * time.Second)
 	}
+}
 
+// getAgendaQueueCounts returns the number of jobs per queue (name) in the Agenda jobs collection
+func getAgendaQueueCounts(client *mongo.Client, dbName, collectionName string) (map[string]int, error) {
+	coll := client.Database(dbName).Collection(collectionName)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	pipeline := mongo.Pipeline{
+		bson.D{{Key: "$group", Value: bson.D{{Key: "_id", Value: "$name"}, {Key: "count", Value: bson.D{{Key: "$sum", Value: 1}}}}}},
+	}
+	cursor, err := coll.Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+	result := make(map[string]int)
+	for cursor.Next(ctx) {
+		var doc struct {
+			ID    string `bson:"_id"`
+			Count int    `bson:"count"`
+		}
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+		result[doc.ID] = doc.Count
+	}
+	return result, nil
 }
 
 // getLaravelJobsQueueCounts returns the number of pending jobs per queue in the default Laravel jobs table
