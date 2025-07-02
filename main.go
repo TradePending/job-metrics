@@ -200,10 +200,10 @@ func main() {
 	}
 	defer func() { _ = mp.Shutdown(ctx) }()
 
-	meter := otel.Meter("sidekiq-metrics")
+	meter := otel.Meter("job-metrics")
 
 	queueGauge, err := meter.Float64ObservableGauge(
-		"sidekiq_queue_length",
+		"job_queue_length",
 	)
 	if err != nil {
 		fmt.Println("Error creating gauge:", err)
