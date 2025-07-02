@@ -1,12 +1,12 @@
 package main
 
 import (
-	   "context"
-	   "crypto/tls"
-	   "flag"
-	   "fmt"
-	   "os"
-	   "time"
+	"context"
+	"crypto/tls"
+	"flag"
+	"fmt"
+	"os"
+	"time"
 
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
@@ -93,21 +93,21 @@ func getSidekiqQueueLengths(rdb *redis.Client) (map[string]int, error) {
 }
 func main() {
 	// Flags
-	   var (
-			   redisAddr            = flag.String("redis-addr", "localhost:6379", "Redis server address (host:port)")
-			   redisPassword        = flag.String("redis-password", "", "Redis password (optional)")
-			   redisDB              = flag.Int("redis-db", 0, "Redis database number")
-			   redisTLS             = flag.Bool("redis-tls", false, "Enable TLS/SSL for Redis connection")
-			   showHelp             = flag.Bool("help", false, "Show help message")
-			   exporterType         = flag.String("exporter", "console", "Exporter type: 'otlp' or 'console'")
-			   otlpEndpoint         = flag.String("otlp-endpoint", "localhost:4317", "OTLP exporter endpoint (host:port)")
-			   daemonMode           = flag.Bool("daemon", false, "Run as a daemon (repeat at interval)")
-			   interval             = flag.Duration("interval", 10_000_000_000, "Interval between metric collections (e.g., 10s, 1m)")
-			   otelServiceName      = flag.String("otel-service-name", "sidekiq-metrics", "OpenTelemetry service name")
-			   otelServiceNamespace = flag.String("otel-service-namespace", "default", "OpenTelemetry service namespace")
-			   otelServiceEnv       = flag.String("otel-service-env", "dev", "OpenTelemetry deployment environment")
-			   otelHost             = flag.String("otel-host", "localhost", "OpenTelemetry host name")
-	   )
+	var (
+		redisAddr            = flag.String("redis-addr", "localhost:6379", "Redis server address (host:port)")
+		redisPassword        = flag.String("redis-password", "", "Redis password (optional)")
+		redisDB              = flag.Int("redis-db", 0, "Redis database number")
+		redisTLS             = flag.Bool("redis-tls", false, "Enable TLS/SSL for Redis connection")
+		showHelp             = flag.Bool("help", false, "Show help message")
+		exporterType         = flag.String("exporter", "console", "Exporter type: 'otlp' or 'console'")
+		otlpEndpoint         = flag.String("otlp-endpoint", "localhost:4317", "OTLP exporter endpoint (host:port)")
+		daemonMode           = flag.Bool("daemon", false, "Run as a daemon (repeat at interval)")
+		interval             = flag.Duration("interval", 10_000_000_000, "Interval between metric collections (e.g., 10s, 1m)")
+		otelServiceName      = flag.String("otel-service-name", "sidekiq-metrics", "OpenTelemetry service name")
+		otelServiceNamespace = flag.String("otel-service-namespace", "default", "OpenTelemetry service namespace")
+		otelServiceEnv       = flag.String("otel-service-env", "dev", "OpenTelemetry deployment environment")
+		otelHost             = flag.String("otel-host", "localhost", "OpenTelemetry host name")
+	)
 	flag.Parse()
 
 	if *showHelp {
@@ -116,15 +116,17 @@ func main() {
 		os.Exit(0)
 	}
 
-	   redisOpts := &redis.Options{
-			   Addr:     *redisAddr,
-			   Password: *redisPassword,
-			   DB:       *redisDB,
-	   }
-	   if *redisTLS {
-			   redisOpts.TLSConfig = &tls.Config{}
-	   }
-	   rdb := redis.NewClient(redisOpts)
+	redisOpts := &redis.Options{
+		Addr:     *redisAddr,
+		Password: *redisPassword,
+		DB:       *redisDB,
+	}
+	if *redisTLS {
+		tlsConfig := &tls.Config{}
+		tlsConfig.InsecureSkipVerify = true
+		redisOpts.TLSConfig = tlsConfig
+	}
+	rdb := redis.NewClient(redisOpts)
 
 	mp, err := setupMeterProvider(*exporterType, *otlpEndpoint, *otelServiceName, *otelServiceNamespace, *otelServiceEnv, *otelHost)
 	if err != nil {
