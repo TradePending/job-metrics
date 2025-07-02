@@ -122,8 +122,11 @@ func main() {
 		DB:       *redisDB,
 	}
 	if *redisTLS {
-		tlsConfig := &tls.Config{}
-		tlsConfig.InsecureSkipVerify = true
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true,
+			ServerName:         "",
+		}
+
 		redisOpts.TLSConfig = tlsConfig
 	}
 	rdb := redis.NewClient(redisOpts)
