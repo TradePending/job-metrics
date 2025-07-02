@@ -1,0 +1,48 @@
+# Binaries
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+
+# Output of build tools
+/build/
+/bin/
+
+# Vendor directory
+/vendor/
+
+# Dependency directories (remove the comment below if you use Go modules)
+# Uncomment if you use vendoring
+# /vendor/
+
+# Go workspace file
+*.code-workspace
+
+# IDE/editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Coverage files
+*.coverprofile
+coverage.out
+
+# Test binary
+sidekiq-metrics.test
+
+# Go module files backup
+go.sum
+
+sidekiq_metrics
