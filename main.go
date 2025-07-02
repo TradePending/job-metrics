@@ -3,10 +3,15 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"database/sql"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
+	"strings"
 	"time"
+
+	mysql "github.com/go-sql-driver/mysql"
 
 	"go.opentelemetry.io/otel/sdk/resource"
 	semconv "go.opentelemetry.io/otel/semconv/v1.17.0"
@@ -92,8 +97,9 @@ func getSidekiqQueueLengths(rdb *redis.Client) (map[string]int, error) {
 	return queues, nil
 }
 func main() {
-	// Flags
 	var (
+		jobType              = flag.String("job-type", "sidekiq", "Type of jobs to collect: 'sidekiq' or 'laravel'")
+		mysqlDSN             = flag.String("mysql-dsn", "laravel:secret@tcp(mysql:3306)/laravel", "MySQL DSN or URL (e.g. user:pass@tcp(host:port)/db or mysql://host:port/db?useSSL=true)")
 		redisAddr            = flag.String("redis-addr", "localhost:6379", "Redis server address (host:port)")
 		redisPassword        = flag.String("redis-password", "", "Redis password (optional)")
 		redisDB              = flag.Int("redis-db", 0, "Redis database number")
@@ -103,7 +109,7 @@ func main() {
 		otlpEndpoint         = flag.String("otlp-endpoint", "localhost:4317", "OTLP exporter endpoint (host:port)")
 		daemonMode           = flag.Bool("daemon", false, "Run as a daemon (repeat at interval)")
 		interval             = flag.Duration("interval", 10_000_000_000, "Interval between metric collections (e.g., 10s, 1m)")
-		otelServiceName      = flag.String("otel-service-name", "sidekiq-metrics", "OpenTelemetry service name")
+		otelServiceName      = flag.String("otel-service-name", "job-metrics", "OpenTelemetry service name")
 		otelServiceNamespace = flag.String("otel-service-namespace", "default", "OpenTelemetry service namespace")
 		otelServiceEnv       = flag.String("otel-service-env", "dev", "OpenTelemetry deployment environment")
 		otelHost             = flag.String("otel-host", "localhost", "OpenTelemetry host name")
@@ -111,25 +117,81 @@ func main() {
 	flag.Parse()
 
 	if *showHelp {
-		fmt.Println("Usage of sidekiq-metrics:")
+		fmt.Println("Usage of job-metrics:")
 		flag.PrintDefaults()
 		os.Exit(0)
 	}
 
-	redisOpts := &redis.Options{
-		Addr:     *redisAddr,
-		Password: *redisPassword,
-		DB:       *redisDB,
-	}
-	if *redisTLS {
-		tlsConfig := &tls.Config{
-			InsecureSkipVerify: true,
-			ServerName:         "",
+	var rdb *redis.Client
+	var db *sql.DB
+	if *jobType == "sidekiq" {
+		redisOpts := &redis.Options{
+			Addr:     *redisAddr,
+			Password: *redisPassword,
+			DB:       *redisDB,
 		}
-
-		redisOpts.TLSConfig = tlsConfig
+		if *redisTLS {
+			tlsConfig := &tls.Config{
+				InsecureSkipVerify: true,
+			}
+			redisOpts.TLSConfig = tlsConfig
+		}
+		rdb = redis.NewClient(redisOpts)
+	} else if *jobType == "laravel" {
+		dsn := *mysqlDSN
+		// If the DSN looks like a URL, convert to DSN and handle SSL
+		if strings.HasPrefix(dsn, "mysql://") {
+			u, err := url.Parse(dsn)
+			if err != nil {
+				fmt.Println("Invalid MySQL URL:", err)
+				os.Exit(1)
+			}
+			// Extract user/pass
+			user := ""
+			pass := ""
+			if u.User != nil {
+				user = u.User.Username()
+				pass, _ = u.User.Password()
+			}
+			host := u.Host
+			dbName := strings.TrimPrefix(u.Path, "/")
+			params := u.Query()
+			// SSL options
+			useSSL := params.Get("useSSL") == "true"
+			requireSSL := params.Get("requireSSL") == "true"
+			tlsName := ""
+			if useSSL || requireSSL {
+				tlsConfig := &tls.Config{
+					MinVersion:         tls.VersionTLS12,
+					InsecureSkipVerify: false,
+				}
+				if params.Get("insecureSkipVerify") == "true" {
+					tlsConfig.InsecureSkipVerify = true
+				}
+				tlsName = "custom"
+				err := mysql.RegisterTLSConfig(tlsName, tlsConfig)
+				if err != nil {
+					fmt.Println("Failed to register MySQL TLS config:", err)
+					os.Exit(1)
+				}
+			}
+			// Build DSN
+			dsn = fmt.Sprintf("%s:%s@tcp(%s)/%s", user, pass, host, dbName)
+			if tlsName != "" {
+				dsn += fmt.Sprintf("?tls=%s", tlsName)
+			}
+		}
+		var err error
+		db, err = sql.Open("mysql", dsn)
+		if err != nil {
+			fmt.Println("Error connecting to MySQL:", err)
+			os.Exit(1)
+		}
+		defer db.Close()
+	} else {
+		fmt.Println("Unknown job type. Use 'sidekiq' or 'laravel'.")
+		os.Exit(1)
 	}
-	rdb := redis.NewClient(redisOpts)
 
 	mp, err := setupMeterProvider(*exporterType, *otlpEndpoint, *otelServiceName, *otelServiceNamespace, *otelServiceEnv, *otelHost)
 	if err != nil {
@@ -149,16 +211,26 @@ func main() {
 	}
 
 	if *daemonMode {
-		fmt.Printf("Collecting Sidekiq metrics every %s... (Ctrl+C to stop)\n", interval.String())
+		fmt.Printf("Collecting %s metrics every %s... (Ctrl+C to stop)\n", *jobType, interval.String())
 		for {
 			_, err := meter.RegisterCallback(
 				func(ctx context.Context, o metric.Observer) error {
-					queues, err := getSidekiqQueueLengths(rdb)
-					if err != nil {
-						return err
-					}
-					for name, count := range queues {
-						o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", name)))
+					if *jobType == "sidekiq" {
+						queues, err := getSidekiqQueueLengths(rdb)
+						if err != nil {
+							return err
+						}
+						for name, count := range queues {
+							o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", name)))
+						}
+					} else if *jobType == "laravel" {
+						queueCounts, err := getLaravelJobsQueueCounts(db)
+						if err != nil {
+							return err
+						}
+						for queue, count := range queueCounts {
+							o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", queue)))
+						}
 					}
 					return nil
 				},
@@ -171,28 +243,72 @@ func main() {
 		}
 	} else {
 		// One-shot: print to console for visibility
-		queues, err := getSidekiqQueueLengths(rdb)
-		if err != nil {
-			fmt.Println("Error collecting queue lengths:", err)
-			os.Exit(1)
-		}
-		for name, count := range queues {
-			fmt.Printf("queue=%s length=%d\n", name, count)
-		}
-		_, err = meter.RegisterCallback(
-			func(ctx context.Context, o metric.Observer) error {
-				for name, count := range queues {
-					o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", name)))
-				}
-				return nil
-			},
-			queueGauge,
-		)
-		if err != nil {
-			fmt.Println("Error registering callback:", err)
-			os.Exit(1)
+		if *jobType == "sidekiq" {
+			queues, err := getSidekiqQueueLengths(rdb)
+			if err != nil {
+				fmt.Println("Error collecting queue lengths:", err)
+				os.Exit(1)
+			}
+			for name, count := range queues {
+				fmt.Printf("queue=%s length=%d\n", name, count)
+			}
+			_, err = meter.RegisterCallback(
+				func(ctx context.Context, o metric.Observer) error {
+					for name, count := range queues {
+						o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", name)))
+					}
+					return nil
+				},
+				queueGauge,
+			)
+			if err != nil {
+				fmt.Println("Error registering callback:", err)
+				os.Exit(1)
+			}
+		} else if *jobType == "laravel" {
+			queueCounts, err := getLaravelJobsQueueCounts(db)
+			if err != nil {
+				fmt.Println("Error collecting laravel job queue counts:", err)
+				os.Exit(1)
+			}
+			for queue, count := range queueCounts {
+				fmt.Printf("queue=%s length=%d\n", queue, count)
+			}
+			_, err = meter.RegisterCallback(
+				func(ctx context.Context, o metric.Observer) error {
+					for queue, count := range queueCounts {
+						o.ObserveFloat64(queueGauge, float64(count), metric.WithAttributes(attribute.String("queue", queue)))
+					}
+					return nil
+				},
+				queueGauge,
+			)
+			if err != nil {
+				fmt.Println("Error registering callback:", err)
+				os.Exit(1)
+			}
 		}
 		// Give time for the exporter to flush
 		time.Sleep(2 * time.Second)
 	}
+
+}
+
+// getLaravelJobsQueueCounts returns the number of pending jobs per queue in the default Laravel jobs table
+func getLaravelJobsQueueCounts(db *sql.DB) (map[string]int, error) {
+	rows, err := db.Query("SELECT queue, COUNT(*) FROM jobs GROUP BY queue")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make(map[string]int)
+	for rows.Next() {
+		var queue string
+		var count int
+		if err := rows.Scan(&queue, &count); err != nil {
+			return nil, err
+		}
+		result[queue] = count
+	}
+	return result, nil
 }

@@ -5,10 +5,10 @@ COPY go.mod .
 COPY go.sum .
 COPY main.go .
 RUN go mod download
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o sidekiq-metrics main.go
-RUN chmod +x sidekiq-metrics
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -o job-metrics main.go
+RUN chmod +x job-metrics
 
 FROM alpine:3.19
 WORKDIR /app
-COPY --from=builder /app/sidekiq-metrics ./sidekiq-metrics
-ENTRYPOINT ["/app/sidekiq-metrics"]
+COPY --from=builder /app/job-metrics ./job-metrics
+ENTRYPOINT ["/app/job-metrics"]

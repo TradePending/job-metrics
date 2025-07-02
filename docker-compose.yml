@@ -1,11 +1,11 @@
 version: '3.8'
 
 services:
-  sidekiq-metrics:
+  job-metrics:
     build:
       context: .
       dockerfile: Dockerfile
-    image: sidekiq-metrics:latest
+    image: job-metrics:latest
     platform: linux/amd64
     environment:
       - REDIS_ADDR=redis:6379
@@ -13,9 +13,24 @@ services:
       - REDIS_DB=0
     depends_on:
       - redis
-    command: ["/app/sidekiq-metrics"]
+    command: ["/app/job-metrics"]
 
   redis:
     image: redis:7-alpine
     ports:
       - "6379:6379"
+
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_ROOT_PASSWORD: example
+      MYSQL_DATABASE: laravel
+      MYSQL_USER: laravel
+      MYSQL_PASSWORD: secret
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+
+volumes:
+  mysql_data:

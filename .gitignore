@@ -40,9 +40,9 @@ Thumbs.db
 coverage.out
 
 # Test binary
-sidekiq-metrics.test
+job-metrics.test
 
 # Go module files backup
 go.sum
 
-sidekiq-metrics
+job-metrics
