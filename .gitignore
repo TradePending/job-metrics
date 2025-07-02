@@ -45,4 +45,4 @@ sidekiq-metrics.test
 # Go module files backup
 go.sum
 
-sidekiq_metrics
+sidekiq-metrics
