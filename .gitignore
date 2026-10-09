@@ -42,7 +42,4 @@ coverage.out
 # Test binary
 job-metrics.test
 
-# Go module files backup
-go.sum
-
 job-metrics
